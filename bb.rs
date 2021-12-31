@@ -157,8 +157,8 @@ fn block_compare(a: usize, b: usize, block: &[u8]) -> Ordering {
 // transformed data followed by an 8 byte primary index. 
 fn bwt_transform_block(file_in: &mut BufReader<File>) -> Vec<u8> { 
     let mut primary_index: usize = 0; // Starting point for inverse transform
-    let mut indexes: Vec<u32> = vec![0; file_in.buffer().len()]; // Indexes into block
-    let mut bwt: Vec<u8> = vec![0; file_in.buffer().len()];      // BWT output
+    let mut indexes = vec![0u32; file_in.buffer().len()]; // Indexes into block
+    let mut bwt = vec![0u8; file_in.buffer().len()];      // BWT output
 
     // Create indexes into block
     for i in 0..indexes.len() { indexes[i as usize] = i as u32; }
@@ -167,13 +167,14 @@ fn bwt_transform_block(file_in: &mut BufReader<File>) -> Vec<u8> {
     indexes[..].sort_by(|a, b| block_compare(*a as usize, *b as usize, file_in.buffer()));
     
     // Get primary index and BWT output
-    for i in 0..bwt.len() {
+    for i in 0..bwt.len() { 
         if indexes[i] == 1 {
             primary_index = i;
         }
         if indexes[i] == 0 { 
             bwt[i] = file_in.buffer()[file_in.buffer().len() - 1];
-        } else {
+        } 
+        else {
             bwt[i] = file_in.buffer()[(indexes[i] as usize) - 1];
         }    
     } 
@@ -189,22 +190,23 @@ fn bwt_transform_block(file_in: &mut BufReader<File>) -> Vec<u8> {
 // Takes in a BWT block, inverts it, and writes 
 // the original data to the output file.
 fn inverse_bwt_transform(block: &[u8], file_out: &mut BufWriter<File>) {
-    let mut transform_vector: Vec<u32> = vec![0; block.len() - 8];
+    let bwt_size = block.len() - 8; // Size of bwt block not including primary index
+    let mut transform_vector = vec![0u32; bwt_size];
 
     // Read primary index
     let mut primary_index: usize = 0;
     let mut shift = 0;
-    for i in ((block.len() - 8)..(block.len())).rev() {
+    for i in (bwt_size..block.len()).rev() {
         primary_index += (block[i] as usize) << shift;
         shift += 8;
     }
-    
+     
     let mut counts = [0u32; 256];
     let mut cumul_counts = [0u32; 256];
 
     // Get number of occurences for each byte
-    for i in 0..block.len() - 8 {
-        counts[block[i] as usize] += 1;    
+    for byte in block.iter().take(bwt_size) {
+        counts[*byte as usize] += 1;    
     }
 
     // Get cumulative counts for each byte
@@ -216,7 +218,7 @@ fn inverse_bwt_transform(block: &[u8], file_out: &mut BufWriter<File>) {
     }
 
     // Build transformation vector
-    for i in 0..block.len() - 8 {
+    for i in 0..bwt_size {
         let index = block[i] as usize; 
         transform_vector[(counts[index] + cumul_counts[index]) as usize] = i as u32;
         counts[index] += 1;
@@ -224,7 +226,7 @@ fn inverse_bwt_transform(block: &[u8], file_out: &mut BufWriter<File>) {
     
     // Invert transform and output original data
     let mut index = primary_index;
-    for _ in 0..block.len() - 8 { 
+    for _ in 0..bwt_size { 
         file_out.write_byte(block[index]);
         index = transform_vector[index] as usize;
     }
@@ -279,21 +281,19 @@ impl Stretch {
 
 // Adaptive Probability Map -------------------------------------------------------------------------------------- Adaptive Probability Map
 struct Apm {
-    stretch:    Stretch,
-    bin:        usize,    
-    num_cxts:   usize, 
-    bin_map:    Vec<u16>, // maps each bin to a squashed value
+    stretch:   Stretch,
+    bin:       usize,    
+    num_cxts:  usize, 
+    bin_map:   Vec<u16>, // maps each bin to a squashed value
 }
 impl Apm {
     fn new(n: usize) -> Apm {
         let mut apm = Apm {  
             stretch:    Stretch::new(), 
-            bin:        0, // last pr, context
+            bin:        0, 
             num_cxts:   n,
-            bin_map:    Vec::with_capacity(n * 33),
+            bin_map:    vec![0; n * 33],
         };
-        apm.bin_map.resize(n * 33, 0);
-
         for cxt in 0..apm.num_cxts {
             for bin in 0usize..33 {
                 apm.bin_map[(cxt * 33) + bin] = if cxt == 0 {
@@ -310,25 +310,25 @@ impl Apm {
         self.update(bit, rate);
         
         pr = self.stretch.stretch(pr);   // -2047 to 2047
-        let interp_wght = pr & 127;      // Interpolation weight (33 points)
+        let i_w = pr & 127;      // Interpolation weight (33 points)
         
         // Each context has a corresponding set of 33 bins, and bin is 
         // a specific bin within the set corresponding to the current context
         self.bin = (((pr + 2048) >> 7) + ((cxt as i32) * 33)) as usize;
 
-        (((self.bin_map[self.bin]     as i32) * (128 - interp_wght) ) + 
-        ( (self.bin_map[self.bin + 1] as i32) *        interp_wght) ) >> 11
+        let a = self.bin_map[self.bin] as i32;
+        let b = self.bin_map[self.bin+1] as i32;
+        ((a * (128 - i_w)) + (b * i_w)) >> 11
     }
     fn update(&mut self, bit: i32, rate: i32) {
         assert!(bit == 0 || bit == 1 && rate > 0 && rate < 32);
         
         // Variable g controls direction of update (bit = 1: increase, bit = 0: decrease)
         let g: i32 = (bit << 16) + (bit << rate) - bit - bit;
-        self.bin_map[self.bin    ] = ( (self.bin_map[self.bin    ] as i32) + 
-                                 ((g - (self.bin_map[self.bin    ] as i32)) >> rate) ) as u16;
-
-        self.bin_map[self.bin + 1] = ( (self.bin_map[self.bin + 1] as i32) + 
-                                 ((g - (self.bin_map[self.bin + 1] as i32)) >> rate) ) as u16;
+        let a = self.bin_map[self.bin] as i32;
+        let b = self.bin_map[self.bin+1] as i32;
+        self.bin_map[self.bin]   = (a + ((g - a) >> rate)) as u16;
+        self.bin_map[self.bin+1] = (b + ((g - b) >> rate)) as u16;
     }
 }
 // ----------------------------------------------------------------------------------------------------------------------------------------
@@ -374,48 +374,43 @@ const STATE_TABLE: [[u8; 2]; 256] = [
 [249,135],[250, 69],[ 80,251],[140,252],[249,135],[250, 69],[ 80,251], // 245
 [140,252],[  0,  0],[  0,  0],[  0,  0]];  // 252
 
+
+#[allow(overflowing_literals)]
+const HI_23_MSK: i32 = 0xFFFFFE00;
 const LIMIT: usize = 127; // Controls rate of adaptation (higher = slower) (0..512)
 
-
 struct StateMap {
-    cxt:           usize,         // Context of last prediction
-    cxt_map:       Vec<u32>,      // Maps a context to a prediction and a count
-    recipr_table:  [i32; 512],    // Controls the size of each adjustment to cxt_map
+    cxt:      usize,         // Context of last prediction
+    cxt_map:  Vec<u32>,      // Maps a context to a prediction and a count
+    rec_t:    [i32; 512],    // Controls the size of each adjustment to cxt_map
 }
 impl StateMap {
     fn new(n: usize) -> StateMap {
         let mut sm = StateMap { 
-            cxt:           0,
-            cxt_map:       Vec::with_capacity(n),
-            recipr_table:  [0; 512],
+            cxt:      0,
+            cxt_map:  vec![1 << 31; n],
+            rec_t:    [0; 512],
         };
-        sm.cxt_map.resize(n, 0);
-
-        for pr in sm.cxt_map.iter_mut() {
-            *pr = 1 << 31;
-        }
         for i in 0..512 { 
-            sm.recipr_table[i] = (32_768 / (i + i + 5)) as i32; 
+            sm.rec_t[i] = (32_768 / (i + i + 5)) as i32; 
         }
         sm
     }
     fn p(&mut self, bit: i32, cx: usize) -> i32 {
         assert!(bit == 0 || bit == 1);
-        self.update(bit);                      // Update prediction for previous context
+        self.update(bit);                      
         self.cxt = cx;
-        (self.cxt_map[self.cxt] >> 20) as i32  // Output prediction for new context
+        (self.cxt_map[self.cxt] >> 20) as i32  
     }
     fn update(&mut self, bit: i32) {
-        let count: usize = (self.cxt_map[self.cxt] & 511) as usize;  // Low 9 bits
-        let prediction: i32 = (self.cxt_map[self.cxt] >> 14) as i32; // High 18 bits
+        let count = (self.cxt_map[self.cxt] & 511) as usize; // Low 9 bits
+        let pr    = (self.cxt_map[self.cxt] >> 14) as i32;   // High 18 bits
 
         if count < LIMIT { self.cxt_map[self.cxt] += 1; }
 
-        // Updates cxt_map based on the difference between the predicted and actual bit
-        #[allow(overflowing_literals)]
-        let high_23_bits: i32 = 0xFFFFFE00;
+        // Updates cxt_map based on prediction error
         self.cxt_map[self.cxt] = self.cxt_map[self.cxt].wrapping_add(
-        (((bit << 18) - prediction) * self.recipr_table[count] & high_23_bits) as u32); 
+        (((bit << 18) - pr) * self.rec_t[count] & HI_23_MSK) as u32); 
     }
 }
 // ----------------------------------------------------------------------------------------------------------------------------------------
@@ -460,7 +455,8 @@ impl Predictor {
                 if self.run_cxt >= 255 {
                     self.run_cxt = 0;
                 }
-            } else {
+            } 
+            else {
                 self.run_cxt = 0;
             }       
         }
@@ -670,7 +666,6 @@ fn main() {
             let block = dec.decompress_block(final_block_size);
             inverse_bwt_transform(&block, &mut file_out);
             // ----------------------------------------------------------------
-
             file_out.flush_buffer();
         }
         _ => { 
@@ -684,6 +679,10 @@ fn main() {
     println!("{} bytes -> {} bytes in {:.2?}", 
     file_in_size, file_out_size, start_time.elapsed()); 
 }
+
+
+
+
 
 
 
